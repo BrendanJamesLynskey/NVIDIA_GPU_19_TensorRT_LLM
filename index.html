@@ -855,7 +855,7 @@ python convert_checkpoint.py \
     <span class="dir">--dtype</span> bfloat16 \
     <span class="dir">--tp_size</span> <span class="num">8</span>
 
-<span class="cm"># 2. Quantize (FP8 in this example; alternatives: AWQ-INT4, MX-FP4)</span>
+<span class="cm"># 2. Quantize (FP8 in this example; alternatives: AWQ-INT4, NVFP4, MX-FP4)</span>
 python ../quantization/quantize.py \
     <span class="dir">--model_dir</span> ./Meta-Llama-3-70B-Instruct \
     <span class="dir">--output_dir</span> ./tllm_ckpt/70b-fp8 \
@@ -910,7 +910,7 @@ trtllm-build \
         <span class="diagram-arrow">&darr;</span>
         <div class="diagram-box">tactic selection (try every kernel for every matmul, pick fastest)</div>
         <span class="diagram-arrow">&darr;</span>
-        <div class="diagram-box">quantization insertion (FP8 scales, AWQ INT4 layout, MX-FP4 microblocks)</div>
+        <div class="diagram-box">quantization insertion (FP8 scales, AWQ INT4 layout, NVFP4 / MX-FP4 microblocks)</div>
         <span class="diagram-arrow">&darr;</span>
         <div class="diagram-box">kernel templating (CUTLASS for matmul, attention plugin for MHA)</div>
         <span class="diagram-arrow">&darr;</span>
@@ -924,7 +924,7 @@ trtllm-build \
     <div class="diagram-grid cols-2">
         <div class="diagram-panel accent-border">
             <h4>Attention plugin</h4>
-            <p>Hand-written fused multi-head attention with paged-KV awareness. Hopper variant uses WGMMA + TMA; Blackwell variant adds MX microblock support. This is where the bulk of the H100/B200 wins come from.</p>
+            <p>Hand-written fused multi-head attention with paged-KV awareness. Hopper variant uses WGMMA + TMA; Blackwell variant adds NVFP4 / MX-FP4 microblock support. This is where the bulk of the H100/B200 wins come from.</p>
         </div>
         <div class="diagram-panel accent-border">
             <h4>GEMM plugin</h4>
@@ -1073,12 +1073,12 @@ trtllm-build \
             </thead>
             <tbody>
                 <tr><td>FP16 / BF16</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>Always available; the floor.</td></tr>
-                <tr><td>FP8 E4M3 weights+activations</td><td>&mdash;</td><td>L40S only</td><td>&#10003;</td><td>&#10003;</td><td>2&times; over BF16 on prefill via Transformer Engine.</td></tr>
-                <tr><td>FP8 KV cache</td><td>&mdash;</td><td>L40S only</td><td>&#10003;</td><td>&#10003;</td><td>Halves KV memory; tiny accuracy loss.</td></tr>
+                <tr><td>FP8 E4M3 weights+activations</td><td>&mdash;</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>Silicon present across Ada (incl. consumer 4090, L40S); 2&times; over BF16 on prefill. Transformer Engine integration on Hopper for dynamic scaling.</td></tr>
+                <tr><td>FP8 KV cache</td><td>&mdash;</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>Halves KV memory; tiny accuracy loss.</td></tr>
                 <tr><td>AWQ INT4 weights + FP16 activations</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>Best on Ampere; ubiquitous on consumer cards.</td></tr>
                 <tr><td>GPTQ INT4</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>Older format; AWQ usually preferred.</td></tr>
                 <tr><td>SmoothQuant W8A8</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td><td>INT8 weights and activations; older recipe but cheap.</td></tr>
-                <tr><td>MX-FP4 weights</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&#10003;</td><td>Microblock FP4; 2&times; FP8 throughput on Blackwell tensor cores.</td></tr>
+                <tr><td>NVFP4 / MX-FP4 weights</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&#10003;</td><td>Microblock FP4; 2&times; FP8 throughput on Blackwell tensor cores. <strong>NVFP4 is the TRT-LLM default</strong> (16-elem blocks, E4M3 scale + per-tensor FP32 scale &mdash; more accurate); MX-FP4 is the OCP standard (32-elem blocks, E8M0 scale).</td></tr>
             </tbody>
         </table>
     </div>
@@ -1108,8 +1108,8 @@ python ../quantization/quantize.py \
     </div>
 
     <div class="callout">
-        <div class="callout-label">MX-FP4 is the next cliff</div>
-        <p>Blackwell's MX format groups every 32 elements with a shared 8-bit exponent, giving most of FP8's accuracy at half the bytes. On a B200, MX-FP4 weights run at 2&times; the FP8 tensor-core rate &mdash; a fully quantised 70B is then ~35 GB and fits with massive KV headroom on a single B200. This is the path to running 405B-class models on a single 8-GPU HGX board.</p>
+        <div class="callout-label">FP4 is the next cliff &mdash; NVFP4 is the TRT-LLM default</div>
+        <p>Blackwell accelerates two FP4 microblock formats. <strong>NVFP4</strong> (the TRT-LLM default) uses 16-element blocks with an E4M3 per-block scale plus a per-tensor FP32 scale &mdash; more accurate. <strong>MX-FP4</strong> is the open OCP standard with 32-element blocks and an E8M0 (8-bit exponent) per-block scale. Both run at 2&times; the FP8 tensor-core rate on a B200; a fully quantised 70B is then ~35 GB and fits with massive KV headroom on a single B200. This is the path to running 405B-class models on a single 8-GPU HGX board.</p>
     </div>
 </section>
 
@@ -1345,7 +1345,7 @@ curl http://localhost:8000/v1/chat/completions \
                 </tr>
                 <tr>
                     <td><strong>Quantization recipes</strong></td>
-                    <td>FP8, FP4 (MX), AWQ, GPTQ, SmoothQuant &mdash; calibrated</td>
+                    <td>FP8, FP4 (NVFP4 default, MX-FP4), AWQ, GPTQ, SmoothQuant &mdash; calibrated</td>
                     <td>FP8, AWQ, GPTQ, BitsAndBytes &mdash; less hand-tuning</td>
                 </tr>
                 <tr>
@@ -1426,6 +1426,7 @@ curl http://localhost:8000/v1/chat/completions \
                 <option value="bf16">BF16</option>
                 <option value="fp8" selected>FP8 (E4M3)</option>
                 <option value="awq">AWQ-INT4</option>
+                <option value="nvfp4">NVFP4 (Blackwell, TRT-LLM default)</option>
                 <option value="mxfp4">MX-FP4 (Blackwell only)</option>
             </select>
         </div>
@@ -1470,7 +1471,7 @@ curl http://localhost:8000/v1/chat/completions \
             'b200': { name:'B200',       arch:'blackwell', vram:192, bw:8000, fp8:'native',fp4:'native', flops_bf16: 2250, flops_fp8: 4500 }
         };
         // bytes-per-parameter for weights
-        const precBytes = { 'bf16': 2.0, 'fp8': 1.0, 'awq': 0.55, 'mxfp4': 0.55 };
+        const precBytes = { 'bf16': 2.0, 'fp8': 1.0, 'awq': 0.55, 'nvfp4': 0.55, 'mxfp4': 0.55 };
         // KV bytes per token per layer per head (for a typical Llama-class config); we'll fold into a simple kv_per_token estimate per model
         // model_size_B → (n_layers, hidden, n_kv_heads, head_dim)
         const modelGeom = {
@@ -1501,8 +1502,8 @@ curl http://localhost:8000/v1/chat/completions \
             if (P === 'fp8' && G.fp8 !== 'native'){
                 precNote = 'FP8 emulated on ' + G.arch + ' &mdash; bandwidth win only, no compute speedup.';
             }
-            if (P === 'mxfp4' && G.fp4 !== 'native'){
-                precNote = 'MX-FP4 requires Blackwell &mdash; falling back to AWQ-INT4 for this estimate.';
+            if ((P === 'mxfp4' || P === 'nvfp4') && G.fp4 !== 'native'){
+                precNote = (P === 'nvfp4' ? 'NVFP4' : 'MX-FP4') + ' requires Blackwell &mdash; falling back to AWQ-INT4 for this estimate.';
                 effPrec = 'awq';
             }
 
@@ -1528,7 +1529,7 @@ curl http://localhost:8000/v1/chat/completions \
             const decodeTokS = Math.round(decodeTokSPerStream * Math.min(BS, 64) * 0.55); // batch amortise w/ IFB
             // Prefill ≈ FLOPS-bound at batch>1; rough: prefill = flops_eff / (2 * params_B * 1e9) tokens/s
             const flopsEff = (effPrec === 'fp8' && G.fp8 === 'native') ? G.flops_fp8 :
-                             (effPrec === 'mxfp4' && G.fp4 === 'native') ? G.flops_fp8 * 1.8 :
+                             ((effPrec === 'mxfp4' || effPrec === 'nvfp4') && G.fp4 === 'native') ? G.flops_fp8 * 1.8 :
                              G.flops_bf16;
             const prefillTokS = Math.round((flopsEff * 1e12) / (2 * params_B * 1e9) * tpClamped * 0.45);
 
@@ -1545,9 +1546,10 @@ curl http://localhost:8000/v1/chat/completions \
 
             // Build flag suggestion
             const gemmPlugin = (effPrec === 'fp8') ? 'fp8' :
-                               (effPrec === 'mxfp4') ? 'fp4' :
+                               (effPrec === 'nvfp4' || effPrec === 'mxfp4') ? 'fp4' :
                                (effPrec === 'awq') ? 'auto' : 'auto';
             const qformat   = (effPrec === 'fp8') ? 'fp8' :
+                              (effPrec === 'nvfp4') ? 'nvfp4' :
                               (effPrec === 'mxfp4') ? 'mxfp4' :
                               (effPrec === 'awq') ? 'int4_awq' : 'full_prec';
             const kvDtype   = (effPrec === 'bf16') ? 'auto' : 'fp8';
